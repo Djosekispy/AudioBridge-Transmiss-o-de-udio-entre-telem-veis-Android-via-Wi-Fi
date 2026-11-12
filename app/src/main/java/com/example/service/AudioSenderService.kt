@@ -39,8 +39,8 @@ enum class AudioSourceType {
 }
 
 /**
- * Serviço de Foreground para capturar o áudio do sistema ou do microfone (AudioRecord)
- * e transmiti-lo em tempo real via rede UDP para ser reproduzido no receptor (AudioTrack).
+ * Serviço de Foreground para capturar o áudio do sistema ou do microfone
+ * e transmiti-lo em tempo real via rede UDP para o receptor.
  */
 class AudioSenderService : Service() {
 
@@ -122,11 +122,12 @@ class AudioSenderService : Service() {
     private fun startForegroundServiceNotification() {
         val notification = createNotification("AudioBridge: Transmissão Ativa")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
+            val serviceType = if (_audioSourceType.value == AudioSourceType.MICROPHONE && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            )
+            }
+            startForeground(NOTIFICATION_ID, notification, serviceType)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -154,6 +155,62 @@ class AudioSenderService : Service() {
         }
     }
 
+    private fun createMicrophoneRecord(bufferSize: Int): Pair<AudioRecord?, Boolean /* isMono */> {
+        // 1. Tenta formato Estéreo
+        try {
+            val minStereo = AudioRecord.getMinBufferSize(
+                AudioConstants.SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_STEREO,
+                AudioConstants.AUDIO_FORMAT
+            )
+            if (minStereo > 0) {
+                val bufSize = Math.max(minStereo, bufferSize)
+                val rec = AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    AudioConstants.SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_STEREO,
+                    AudioConstants.AUDIO_FORMAT,
+                    bufSize
+                )
+                if (rec.state == AudioRecord.STATE_INITIALIZED) {
+                    Log.d(TAG, "AudioRecord inicializado com sucesso em Modo Estéreo.")
+                    return Pair(rec, false)
+                }
+                rec.release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Gravação do microfone em Estéreo falhou, a tentar Mono...", e)
+        }
+
+        // 2. Fallback para Mono (suportado por todos os microfones Android)
+        try {
+            val minMono = AudioRecord.getMinBufferSize(
+                AudioConstants.SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioConstants.AUDIO_FORMAT
+            )
+            if (minMono > 0) {
+                val bufSize = Math.max(minMono, bufferSize)
+                val rec = AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    AudioConstants.SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioConstants.AUDIO_FORMAT,
+                    bufSize
+                )
+                if (rec.state == AudioRecord.STATE_INITIALIZED) {
+                    Log.d(TAG, "AudioRecord inicializado com sucesso em Modo Mono.")
+                    return Pair(rec, true)
+                }
+                rec.release()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Gravação do microfone em Mono também falhou.", e)
+        }
+
+        return Pair(null, false)
+    }
+
     private fun startAudioCaptureAndStream(
         resultCode: Int,
         resultData: Intent?,
@@ -173,15 +230,20 @@ class AudioSenderService : Service() {
                 )
                 val bufferSize = Math.max(minBufferSize, AudioConstants.PAYLOAD_SIZE_BYTES * 4)
 
-                val record: AudioRecord = if (_audioSourceType.value == AudioSourceType.MICROPHONE) {
-                    // Captura do Microfone do dispositivo Android
-                    AudioRecord(
-                        MediaRecorder.AudioSource.MIC,
-                        AudioConstants.SAMPLE_RATE,
-                        AudioConstants.CHANNEL_CONFIG_IN,
-                        AudioConstants.AUDIO_FORMAT,
-                        bufferSize
-                    )
+                var isMonoCapture = false
+                val record: AudioRecord?
+
+                if (_audioSourceType.value == AudioSourceType.MICROPHONE) {
+                    // Captura do Microfone com Fallback Estéreo -> Mono
+                    val micPair = createMicrophoneRecord(bufferSize)
+                    record = micPair.first
+                    isMonoCapture = micPair.second
+
+                    if (record == null) {
+                        _errorMessage.value = "Não foi possível aceder ao microfone do dispositivo."
+                        stopSelf()
+                        return@launch
+                    }
                 } else {
                     // Captura do Áudio Interno do Sistema via MediaProjection
                     if (resultData == null || resultCode != -1) {
@@ -213,7 +275,7 @@ class AudioSenderService : Service() {
                         .addMatchingUsage(AudioAttributes.USAGE_GAME)
                         .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
 
-                    AudioRecord.Builder()
+                    record = AudioRecord.Builder()
                         .setAudioFormat(
                             AudioFormat.Builder()
                                 .setEncoding(AudioConstants.AUDIO_FORMAT)
@@ -244,6 +306,7 @@ class AudioSenderService : Service() {
                 _isTransmitting.value = true
 
                 val payloadBuffer = ByteArray(AudioConstants.PAYLOAD_SIZE_BYTES)
+                val monoReadBuffer = if (isMonoCapture) ByteArray(AudioConstants.PAYLOAD_SIZE_BYTES / 2) else ByteArray(0)
                 val packetBuffer = ByteArray(AudioConstants.PACKET_SIZE_BYTES)
                 var sequenceNumber = 0
                 var totalSent = 0L
@@ -256,6 +319,7 @@ class AudioSenderService : Service() {
                     var bytesRead = 0
 
                     if (_isTestToneEnabled.value) {
+                        // Tom de teste 440Hz
                         var i = 0
                         while (i < payloadBuffer.size - 3) {
                             val sampleVal = (sin(2.0 * Math.PI * toneFrequency * toneSampleIndex / toneSampleRate) * 16000.0).toInt()
@@ -270,7 +334,30 @@ class AudioSenderService : Service() {
                         }
                         bytesRead = payloadBuffer.size
                         Thread.sleep(AudioConstants.DURATION_MS_PER_PACKET.toLong())
+                    } else if (isMonoCapture) {
+                        // Captura Mono e converte para Estéreo duplicando amostras
+                        val readResult = record.read(monoReadBuffer, 0, monoReadBuffer.size)
+                        if (readResult > 0) {
+                            var monoIdx = 0
+                            var stereoIdx = 0
+                            while (monoIdx < readResult - 1 && stereoIdx < payloadBuffer.size - 3) {
+                                val b1 = monoReadBuffer[monoIdx]
+                                val b2 = monoReadBuffer[monoIdx + 1]
+
+                                // Canal Esquerdo
+                                payloadBuffer[stereoIdx] = b1
+                                payloadBuffer[stereoIdx + 1] = b2
+                                // Canal Direito
+                                payloadBuffer[stereoIdx + 2] = b1
+                                payloadBuffer[stereoIdx + 3] = b2
+
+                                monoIdx += 2
+                                stereoIdx += 4
+                            }
+                            bytesRead = stereoIdx
+                        }
                     } else {
+                        // Captura Estéreo Directa
                         val readResult = record.read(payloadBuffer, 0, payloadBuffer.size)
                         if (readResult > 0) {
                             bytesRead = readResult

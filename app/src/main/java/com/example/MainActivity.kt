@@ -165,7 +165,6 @@ fun AudioBridgeApp(
 ) {
     val selectedMode by viewModel.selectedMode.collectAsStateWithLifecycle()
     val targetIp by viewModel.targetIp.collectAsStateWithLifecycle()
-    val targetPort by viewModel.targetPort.collectAsStateWithLifecycle()
     val localIp by viewModel.localIp.collectAsStateWithLifecycle()
     val receiverVolume by viewModel.receiverVolume.collectAsStateWithLifecycle()
 
@@ -174,17 +173,12 @@ fun AudioBridgeApp(
     val discoveredChannels by viewModel.discoveredChannels.collectAsStateWithLifecycle()
     val isDiscovering by viewModel.isDiscovering.collectAsStateWithLifecycle()
     val isAnnouncing by viewModel.isAnnouncing.collectAsStateWithLifecycle()
-    val isTestToneEnabled by viewModel.isTestToneEnabled.collectAsStateWithLifecycle()
     val audioSourceType by viewModel.audioSourceType.collectAsStateWithLifecycle()
 
     val isTransmitting by viewModel.isTransmitting.collectAsStateWithLifecycle()
-    val senderPeak by viewModel.senderAudioPeak.collectAsStateWithLifecycle()
-    val senderPackets by viewModel.senderPacketsCount.collectAsStateWithLifecycle()
     val senderError by viewModel.senderError.collectAsStateWithLifecycle()
 
     val isReceiving by viewModel.isReceiving.collectAsStateWithLifecycle()
-    val receiverLatency by viewModel.receiverLatencyMs.collectAsStateWithLifecycle()
-    val receiverLoss by viewModel.receiverPacketLoss.collectAsStateWithLifecycle()
     val receiverPackets by viewModel.receiverPacketsCount.collectAsStateWithLifecycle()
     val receiverError by viewModel.receiverError.collectAsStateWithLifecycle()
 
@@ -353,16 +347,10 @@ fun AudioBridgeApp(
                     AppMode.SENDER -> {
                         SenderScreen(
                             targetIp = targetIp,
-                            targetPort = targetPort,
                             isTransmitting = isTransmitting,
-                            audioPeakLevel = senderPeak,
-                            sentPacketsCount = senderPackets,
                             errorMessage = senderError,
-                            isTestToneEnabled = isTestToneEnabled,
                             audioSourceType = audioSourceType,
                             onIpChange = viewModel::setTargetIp,
-                            onPortChange = viewModel::setTargetPort,
-                            onTestToneToggle = viewModel::setTestToneEnabled,
                             onAudioSourceChange = viewModel::setAudioSourceType,
                             onStartClick = onRequestStartSender,
                             onStopClick = onRequestStopSender
@@ -371,17 +359,13 @@ fun AudioBridgeApp(
                     AppMode.RECEIVER -> {
                         ReceiverScreen(
                             localIp = localIp,
-                            listenPort = targetPort,
                             isReceiving = isReceiving,
                             volume = receiverVolume,
-                            latencyMs = receiverLatency,
-                            packetLoss = receiverLoss,
                             packetsCount = receiverPackets,
                             errorMessage = receiverError,
                             isPublicMode = isPublicMode,
                             channelName = channelName,
                             isAnnouncing = isAnnouncing,
-                            onPortChange = viewModel::setTargetPort,
                             onVolumeChange = viewModel::setReceiverVolume,
                             onPublicModeToggle = viewModel::setPublicMode,
                             onChannelNameChange = viewModel::setChannelName,
